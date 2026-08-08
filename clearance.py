@@ -126,6 +126,22 @@ if _OK:
             except Exception as err:
                 prints("Anna's Archive: storing clearance cookies failed:", err)
             try:
+                self._page.triggerAction(self._page.WebAction.Stop)
+            except Exception:
+                pass
+            try:
+                self.view.setUrl(QUrl('about:blank'))
+            except Exception:
+                pass
+            try:
+                self.view.setPage(None)
+            except Exception:
+                pass
+            try:
+                self._page.deleteLater()
+            except Exception:
+                pass
+            try:
                 self.accept()
             except Exception:
                 pass
@@ -158,6 +174,7 @@ if _OK:
 
         def _on_request(self, url):
             # Runs on the GUI thread.
+            dlg = None
             try:
                 dlg = _ClearDialog(self.store, url, self.store.user_agent(), self.store.gui)
                 loop = QEventLoop()
@@ -168,6 +185,11 @@ if _OK:
             except Exception as err:
                 prints("Anna's Archive: clearance dialog failed:", err)
             finally:
+                if dlg is not None:
+                    try:
+                        dlg.deleteLater()
+                    except Exception:
+                        pass
                 self._event.set()
 else:
     class ClearanceManager:  # pragma: no cover - degraded fallback
