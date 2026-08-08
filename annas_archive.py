@@ -144,10 +144,10 @@ class AnnasArchiveStore(StorePlugin):
 
     def _search(self, url: str, max_results: int, timeout: int) -> SearchResults:
         br = self._browser()
-        doc = None
         counter = max_results
 
         for page in range(1, ceil(max_results / RESULTS_PER_PAGE) + 1):
+            doc = None
             mirrors = self._mirrors(br, timeout)
             if self.working_mirror is not None and self.working_mirror in mirrors:
                 mirrors.remove(self.working_mirror)
