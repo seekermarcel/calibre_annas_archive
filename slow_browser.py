@@ -19,6 +19,7 @@ are guarded.
 """
 
 import os
+import shutil
 import tempfile
 
 from calibre import prints
@@ -243,6 +244,14 @@ class SlowDownloadBrowser(QDialog):
                 self.status.setText(_('Downloaded, but could not auto-add. Saved to: %s') % path)
         except Exception as err:
             prints("Anna's Archive: add to library failed:", err)
+
+    def done(self, result):
+        super().done(result)
+        if self._added and self._tmpdir:
+            try:
+                shutil.rmtree(self._tmpdir, ignore_errors=True)
+            except Exception:
+                pass
 
     def _add_to_library(self, path) -> bool:
         """Add the downloaded file to the current calibre library, applying any
