@@ -1,4 +1,6 @@
+import json
 import re
+import socket
 from contextlib import closing
 from http.client import RemoteDisconnected
 from math import ceil
@@ -23,6 +25,45 @@ except (ImportError, ModuleNotFoundError):
     from PyQt5.Qt import QUrl
 
 SearchResults = Generator[SearchResult, None, None]
+
+# DNS-over-HTTPS fallback (bypasses ISP-level domain blocking)
+_original_getaddrinfo = socket.getaddrinfo
+_doh_overrides = {}
+
+
+def _doh_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host in _doh_overrides:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', (ip, port or 0))
+                for ip in _doh_overrides[host]]
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+
+
+def _ensure_dns(domains):
+    """Check each domain against system DNS; resolve via Cloudflare DoH on failure."""
+    patched = False
+    for domain in domains:
+        if not domain or domain in _doh_overrides:
+            continue
+        try:
+            _original_getaddrinfo(domain, 443, socket.AF_INET)
+        except socket.gaierror:
+            try:
+                req = Request(
+                    f'https://cloudflare-dns.com/dns-query?name={domain}&type=A',
+                    headers={'Accept': 'application/dns-json'},
+                )
+                with urlopen(req, timeout=5) as resp:
+                    data = json.loads(resp.read())
+                ips = [a['data'] for a in data.get('Answer', []) if a.get('type') == 1]
+                if ips:
+                    _doh_overrides[domain] = ips
+                    patched = True
+                    prints(f"Anna's Archive: {domain} resolved via Cloudflare DNS")
+            except Exception:
+                pass
+    if patched and socket.getaddrinfo is not _doh_getaddrinfo:
+        socket.getaddrinfo = _doh_getaddrinfo
+
 
 # Markers that tell us a response is a DDoS-Guard / Cloudflare interstitial
 # rather than the real page. mechanize (calibre's browser()) runs no JS, so it
@@ -129,15 +170,18 @@ class AnnasArchiveStore(StorePlugin):
         """Return the ordered mirror list to try (Wikipedia first when enabled)."""
         configured = list(self.config.get('mirrors', DEFAULT_MIRRORS)) or list(DEFAULT_MIRRORS)
         if not self.config.get('wikipedia_mirrors', True):
+            _ensure_dns([urlsplit(m).hostname for m in configured])
             return configured
         if self._wiki_mirrors is None:
             self._wiki_mirrors = self._fetch_wikipedia_mirrors(br or self._browser(), timeout)
         if not self._wiki_mirrors:
+            _ensure_dns([urlsplit(m).hostname for m in configured])
             return configured
         merged = list(self._wiki_mirrors)
         for m in configured + list(DEFAULT_MIRRORS):
             if m not in merged:
                 merged.append(m)
+        _ensure_dns([urlsplit(m).hostname for m in merged])
         return merged
 
     # ----------------------------------------------------------------- search
