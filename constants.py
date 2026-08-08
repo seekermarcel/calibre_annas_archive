@@ -62,7 +62,10 @@ class SearchConfiguration:
         return self.combo_box.currentData()
 
     def load(self, value):
-        self.combo_box.setCurrentIndex(self.values.index(value))
+        try:
+            self.combo_box.setCurrentIndex(self.values.index(value))
+        except ValueError:
+            self.combo_box.setCurrentIndex(0)
 
 
 class CheckboxConfiguration(SearchConfiguration):
