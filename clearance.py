@@ -113,6 +113,9 @@ if _OK:
             elif self._t >= 150:                  # hard timeout (~2.5 min)
                 self._finish()
 
+        def reject(self):
+            self._finish()
+
         def _finish(self):
             if self._fired:
                 return
@@ -169,8 +172,8 @@ if _OK:
                     return True
                 self._event.clear()
                 self._request.emit(url)
-                self._event.wait(timeout)
-                return self.store.has_clearance()
+            self._event.wait(timeout)
+            return self.store.has_clearance()
 
         def _on_request(self, url):
             # Runs on the GUI thread.
