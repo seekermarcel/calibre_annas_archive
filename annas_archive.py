@@ -74,15 +74,13 @@ _CHALLENGE_MARKERS = ('ddos-guard', 'ddg-l10n-title', 'just a moment', 'cf-brows
 # DDoS-Guard / Cloudflare clearance cookies worth re-using once the challenge
 # has been cleared in a real browser.
 _CLEARANCE_COOKIES = ('__ddg', 'ddg', 'cf_clearance', '__cf')
-# Presence of any of these in our cookie jar means we hold a live clearance.
-_CLEARANCE_MARKERS = ('__ddg1_', '__ddg5_', '__ddgid_', 'cf_clearance')
 
 _USER_AGENT = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
                '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36')
 
 
-class _SlowChallenge(Exception):
-    """Raised when a /slow_download/ page is gated behind a JS challenge."""
+class _Challenge(Exception):
+    """Raised when a page is gated behind a DDoS-Guard / Cloudflare JS challenge."""
 
     def __init__(self, url):
         super().__init__(url)
@@ -114,7 +112,8 @@ class AnnasArchiveStore(StorePlugin):
         return _USER_AGENT
 
     def has_clearance(self) -> bool:
-        return any(name in _CLEARANCE_MARKERS for (_d, name) in self._cookies)
+        # Only cookies from a browser that actually got past the check are stored.
+        return bool(self._cookies)
 
     def _drop_clearance(self):
         self._cookies.clear()
@@ -127,6 +126,34 @@ class AnnasArchiveStore(StorePlugin):
             except Exception:
                 pass
         return br
+
+    def _clear(self, url) -> bool:
+        """Clear the challenge for url's domain in a real browser (blocks until
+        done). Returns True if we now hold clearance cookies."""
+        if not self.config.get('auto_clearance', True) or self.clearance is None:
+            return False
+        self._drop_clearance()
+        try:
+            return self.clearance.ensure_clearance(url)
+        except Exception as err:
+            prints(f"Anna's Archive: clearance request failed: {err}")
+            return False
+
+    def _fetch(self, url, timeout):
+        """GET url with mechanize. Since ~Oct 2026 DDoS-Guard gates /search and
+        /md5/ too, so on a challenge we clear it in a real browser once and
+        retry. Returns (final_url, body); raises _Challenge if still blocked."""
+        for attempt in (0, 1):
+            try:
+                with closing(self._browser().open(url, timeout=timeout)) as resp:
+                    final, body = resp.geturl(), resp.read()
+                if not self._is_challenge(body):
+                    return final, body
+            except HTTPError as e:
+                if e.code not in (403, 429, 503):
+                    raise
+            if attempt or not self._clear(url):
+                raise _Challenge(url)
 
     @staticmethod
     def _is_challenge(body: bytes) -> bool:
@@ -198,11 +225,15 @@ class AnnasArchiveStore(StorePlugin):
                 mirrors.insert(0, self.working_mirror)
             for mirror in mirrors:
                 try:
-                    with closing(br.open(url.format(base=mirror, page=page), timeout=timeout)) as resp:
-                        if resp.code < 500 or resp.code > 599:
-                            self.working_mirror = mirror
-                            doc = html.fromstring(resp.read())
-                            break
+                    _, body = self._fetch(url.format(base=mirror, page=page), timeout)
+                    self.working_mirror = mirror
+                    doc = html.fromstring(body)
+                    break
+                except _Challenge:
+                    # Every mirror sits behind the same DDoS-Guard; no point trying the rest.
+                    self.working_mirror = None
+                    raise Exception("Anna's Archive browser check was not passed. Search again and "
+                                    "complete the check in the window that pops up.")
                 except (HTTPError, URLError, TimeoutError, RemoteDisconnected, OSError):
                     continue
             if doc is None:
@@ -319,9 +350,9 @@ class AnnasArchiveStore(StorePlugin):
         content_type = link_opts.get('content_type', False)
         use_slow = self.config.get('slow_servers', True)
 
+        _, body = self._fetch(self._get_url(search_result.detail_item), timeout)
+        doc = html.fromstring(body)
         br = self._browser()
-        with closing(br.open(self._get_url(search_result.detail_item), timeout=timeout)) as f:
-            doc = html.fromstring(f.read())
 
         # 1) Preferred path: resolve a Slow Partner Server (#5 first) to a real
         #    file URL. If we manage it, the green-arrow button downloads silently.
@@ -400,16 +431,9 @@ class AnnasArchiveStore(StorePlugin):
 
         # Challenged. Get a fresh clearance via a real (minimised) browser and
         # retry once. Drop any stale cookies first so a re-clear is attempted.
-        if challenged and self.config.get('auto_clearance', True) and self.clearance is not None:
-            self._drop_clearance()
-            try:
-                ok = self.clearance.ensure_clearance(slow[order[0]])
-            except Exception as err:
-                prints(f"Anna's Archive: clearance request failed: {err}")
-                ok = False
-            if ok:
-                url, _ = self._try_slow_servers(order, slow, timeout)
-                return url
+        if challenged and self._clear(slow[order[0]]):
+            url, _ = self._try_slow_servers(order, slow, timeout)
+            return url
         return None
 
     def _try_slow_servers(self, order, slow, timeout):
@@ -420,7 +444,7 @@ class AnnasArchiveStore(StorePlugin):
         for idx in order:
             try:
                 url = self._resolve_slow_download(slow[idx], br, timeout)
-            except _SlowChallenge:
+            except _Challenge:
                 return None, True
             except (HTTPError, URLError, TimeoutError, RemoteDisconnected, OSError):
                 continue
@@ -442,11 +466,11 @@ class AnnasArchiveStore(StorePlugin):
                 body = resp.read()
         except HTTPError as e:
             if e.code in (403, 429, 503):
-                raise _SlowChallenge(url)
+                raise _Challenge(url)
             raise
 
         if self._is_challenge(body):
-            raise _SlowChallenge(url)
+            raise _Challenge(url)
 
         doc = html.fromstring(body)
         # The current AA layout: <a ... target="_blank">📚 Download now</a>.

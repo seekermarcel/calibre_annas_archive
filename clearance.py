@@ -31,8 +31,11 @@ except Exception:
     except Exception:
         _OK = False
 
-# Presence of any of these cookie names means the challenge has been cleared.
-_CLEAR_MARKERS = ('__ddg1_', '__ddg5_', '__ddgid_', 'cf_clearance')
+# Titles of the DDoS-Guard / Cloudflare interstitials. A successful page load
+# whose title is none of these means the challenge has been cleared. (Cookie
+# names are no good for this: DDoS-Guard sets __ddg1_/__ddg5_/__ddgid_ on the
+# very first response, before any check has been passed.)
+_CHALLENGE_TITLES = ('ddos-guard', 'just a moment')
 
 
 def available() -> bool:
@@ -50,6 +53,7 @@ if _OK:
             self._t = 0
             self._clear_ticks = 0
             self._got = {}
+            self._passed = False
 
             self.setWindowTitle("Anna's Archive — verifying access…")
             self.resize(900, 700)
@@ -75,6 +79,7 @@ if _OK:
             except Exception as err:
                 prints("Anna's Archive: clearance cookie hook failed:", err)
 
+            self._page.loadFinished.connect(self._load_finished)
             self.view.load(QUrl(url))
 
             self.timer = QTimer(self)
@@ -93,8 +98,13 @@ if _OK:
             except Exception:
                 pass
 
+        def _load_finished(self, ok):
+            title = (self._page.title() or '').lower()
+            # The challenge page is served with a 403, so ok is False there.
+            self._passed = bool(ok) and not any(t in title for t in _CHALLENGE_TITLES)
+
         def _cleared(self) -> bool:
-            return any(n in _CLEAR_MARKERS for (_, n) in self._got)
+            return self._passed
 
         def _tick(self):
             self._t += 1
@@ -125,7 +135,8 @@ if _OK:
             except Exception:
                 pass
             try:
-                self.store.remember_cookies([(n, v, d) for (d, n), v in self._got.items()])
+                if self._cleared():
+                    self.store.remember_cookies([(n, v, d) for (d, n), v in self._got.items()])
             except Exception as err:
                 prints("Anna's Archive: storing clearance cookies failed:", err)
             try:
