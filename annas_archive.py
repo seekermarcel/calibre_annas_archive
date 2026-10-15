@@ -96,7 +96,9 @@ class AnnasArchiveStore(StorePlugin):
         # Clearance cookies (keyed by (domain, name)) captured from a real
         # browser. Re-injected into every browser() so mechanize can fetch the
         # otherwise challenge-gated /slow_download/ pages.
-        self._cookies = {}
+        # Persisted in the store config so one solved check survives restarts;
+        # stale ones are dropped automatically when the site challenges again.
+        self._cookies = {(d, n): v for d, n, v in self.config.get('cookies', [])}
         # Bridges worker-thread get_details to a GUI-thread clearance browser.
         self.clearance = None
         try:
@@ -117,6 +119,10 @@ class AnnasArchiveStore(StorePlugin):
 
     def _drop_clearance(self):
         self._cookies.clear()
+        self._save_cookies()
+
+    def _save_cookies(self):
+        self.config['cookies'] = [[d, n, v] for (d, n), v in self._cookies.items()]
 
     def _browser(self):
         br = browser(user_agent=_USER_AGENT)
@@ -170,6 +176,7 @@ class AnnasArchiveStore(StorePlugin):
         for name, value, domain in cookies:
             if 'annas-archive' in (domain or '') or any(name.startswith(p) for p in _CLEARANCE_COOKIES):
                 self._cookies[((domain or '').lstrip('.'), name)] = value
+        self._save_cookies()
 
     # ---------------------------------------------------------------- mirrors
 
