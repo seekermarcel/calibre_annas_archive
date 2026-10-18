@@ -42,12 +42,14 @@ Restart calibre afterwards.
 Servers are tried **#5 first** (no waitlist), then #6-#8, then the waitlisted #1-#4.
 
 ### DDoS-Guard auto-clearance
-The slow-download pages sit behind a DDoS-Guard JavaScript challenge that calibre's JS-free
-downloader (mechanize) cannot clear. `clearance.py` runs a **minimised** in-process Chromium window
-on the GUI thread that clears the challenge — usually with no interaction — and captures the
-clearance cookies. Those cookies are re-injected into mechanize so subsequent slow pages resolve
+Search, detail and slow-download pages sit behind a DDoS-Guard JavaScript challenge that calibre's
+JS-free downloader (mechanize) cannot clear. `clearance.py` runs a **minimised** in-process Chromium
+window on the GUI thread that clears the challenge — usually with no interaction — and captures the
+clearance cookies. Those cookies are re-injected into mechanize so subsequent pages resolve
 directly. The clearance is reused until it expires; if an interactive captcha appears, the window is
-surfaced for a one-time solve.
+surfaced for a one-time solve. Parallel lookups share a single check, so you get at most one window
+per search. If a slow-download page is challenged during the background lookups anyway, that book
+just skips the slow link (double-click it to use the manual browser below).
 
 ### Manual fallback browser
 `slow_browser.py` opens Slow Server #5 in an in-process browser (double-click a result) that

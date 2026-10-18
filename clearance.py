@@ -19,13 +19,13 @@ from calibre import prints
 
 try:  # Qt6 / calibre 6+
     from qt.core import (QObject, pyqtSignal, QTimer, QUrl, QEventLoop,
-                         QDialog, QVBoxLayout, QLabel)
+                         QApplication, QDialog, QVBoxLayout, QLabel)
     from qt.webengine import QWebEngineView, QWebEnginePage, QWebEngineProfile
     _OK = True
 except Exception:
     try:  # Qt5 / calibre 5
         from PyQt5.QtCore import QObject, pyqtSignal, QTimer, QUrl, QEventLoop
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QLabel
+        from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QLabel
         from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEnginePage, QWebEngineProfile
         _OK = True
     except Exception:
@@ -190,7 +190,10 @@ if _OK:
             # Runs on the GUI thread.
             dlg = None
             try:
-                dlg = _ClearDialog(self.store, url, self.store.user_agent(), self.store.gui)
+                # calibre's store search window is application-modal and blocks input to
+                # every window but its own children, so parent the dialog to it.
+                parent = QApplication.activeModalWidget() or self.store.gui
+                dlg = _ClearDialog(self.store, url, self.store.user_agent(), parent)
                 loop = QEventLoop()
                 dlg.finished.connect(loop.quit)
                 dlg.show()

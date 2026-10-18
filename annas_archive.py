@@ -1,6 +1,7 @@
 import json
 import re
 import socket
+import threading
 from contextlib import closing
 from http.client import RemoteDisconnected
 from math import ceil
@@ -101,6 +102,10 @@ class AnnasArchiveStore(StorePlugin):
         self._cookies = {(d, n): v for d, n, v in self.config.get('cookies', [])}
         # Bridges worker-thread get_details to a GUI-thread clearance browser.
         self.clearance = None
+        # calibre runs get_details for every result in parallel threads; this
+        # makes them share one clearance dialog instead of each opening its own.
+        self._clear_lock = threading.Lock()
+        self._clear_gen = 0
         try:
             from calibre_plugins.store_annas_archive.clearance import ClearanceManager, available
             if available():
@@ -133,23 +138,32 @@ class AnnasArchiveStore(StorePlugin):
                 pass
         return br
 
-    def _clear(self, url) -> bool:
+    def _clear(self, url, gen) -> bool:
         """Clear the challenge for url's domain in a real browser (blocks until
-        done). Returns True if we now hold clearance cookies."""
+        done). `gen` is the _clear_gen read before the request that got
+        challenged. Returns True if the caller should retry."""
         if not self.config.get('auto_clearance', True) or self.clearance is None:
             return False
-        self._drop_clearance()
-        try:
-            return self.clearance.ensure_clearance(url)
-        except Exception as err:
-            prints(f"Anna's Archive: clearance request failed: {err}")
-            return False
+        with self._clear_lock:
+            if gen != self._clear_gen:
+                # Another thread ran the check while we waited: retry with its cookies.
+                return True
+            self._drop_clearance()
+            try:
+                return self.clearance.ensure_clearance(url)
+            except Exception as err:
+                prints(f"Anna's Archive: clearance request failed: {err}")
+                return False
+            finally:
+                # Bump only once done, so requests made during the check retry too.
+                self._clear_gen += 1
 
     def _fetch(self, url, timeout):
         """GET url with mechanize. Since ~Oct 2026 DDoS-Guard gates /search and
         /md5/ too, so on a challenge we clear it in a real browser once and
         retry. Returns (final_url, body); raises _Challenge if still blocked."""
         for attempt in (0, 1):
+            gen = self._clear_gen
             try:
                 with closing(self._browser().open(url, timeout=timeout)) as resp:
                     final, body = resp.geturl(), resp.read()
@@ -158,7 +172,7 @@ class AnnasArchiveStore(StorePlugin):
             except HTTPError as e:
                 if e.code not in (403, 429, 503):
                     raise
-            if attempt or not self._clear(url):
+            if attempt or not self._clear(url, gen):
                 raise _Challenge(url)
 
     @staticmethod
@@ -288,7 +302,7 @@ class AnnasArchiveStore(StorePlugin):
 
     # ------------------------------------------------------------------- open
 
-    def open(self, parent=None, detail_item=None, external=False):
+    def open(self, gui=None, parent=None, detail_item=None, external=False):
         if detail_item:
             # If we have a md5 and the user wants the in-app captcha flow, take
             # them straight to Slow Partner Server #5 inside calibre's browser
@@ -415,10 +429,10 @@ class AnnasArchiveStore(StorePlugin):
 
     def _resolve_best_slow(self, doc, timeout):
         """Resolve a Slow Partner Server (#5 first) to a direct partner-CDN file
-        URL. The /slow_download/ pages are behind a DDoS-Guard JS challenge, so
-        if mechanize gets challenged we obtain a clearance cookie via a minimised
-        real browser (on the GUI thread) and retry -- after which mechanize gets
-        through and the green-arrow button can download the file directly."""
+        URL using the clearance cookies from the search. If DDoS-Guard challenges
+        /slow_download/ anyway (it rate-limits the parallel detail lookups), give
+        up on the slow link for this book rather than popping a captcha per book;
+        opening the result still offers the in-app slow-download browser."""
         slow = {}
         for a in doc.xpath('//div[@id="md5-panel-downloads"]//a[contains(@class, "js-download-link")]'):
             href = a.get('href') or ''
@@ -432,33 +446,24 @@ class AnnasArchiveStore(StorePlugin):
         order = [i for i in SLOW_SERVER_ORDER if i in slow]
         order += [i for i in sorted(slow) if i not in SLOW_SERVER_ORDER]
 
-        url, challenged = self._try_slow_servers(order, slow, timeout)
-        if url:
-            return url
-
-        # Challenged. Get a fresh clearance via a real (minimised) browser and
-        # retry once. Drop any stale cookies first so a re-clear is attempted.
-        if challenged and self._clear(slow[order[0]]):
-            url, _ = self._try_slow_servers(order, slow, timeout)
-            return url
-        return None
+        return self._try_slow_servers(order, slow, timeout)
 
     def _try_slow_servers(self, order, slow, timeout):
-        """Try each slow server in order with the current cookies. Returns
-        (url_or_None, challenged_bool). Stops at the first challenge because if
-        one server challenges us they all will (it's IP/cookie-based)."""
+        """Try each slow server in order with the current cookies. Returns the
+        url or None. Stops at the first challenge because if one server
+        challenges us they all will (it's IP/cookie-based)."""
         br = self._browser()
         for idx in order:
             try:
                 url = self._resolve_slow_download(slow[idx], br, timeout)
             except _Challenge:
-                return None, True
+                return None
             except (HTTPError, URLError, TimeoutError, RemoteDisconnected, OSError):
                 continue
             if url:
                 prints(f"Anna's Archive: resolved Slow Partner Server #{idx + 1}")
-                return url, False
-        return None, False
+                return url
+        return None
 
     def _resolve_slow_download(self, url, br, timeout):
         """Fetch a /slow_download/ page and extract the real file link.
